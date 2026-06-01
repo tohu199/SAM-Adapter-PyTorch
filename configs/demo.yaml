@@ -6,11 +6,13 @@ train_dataset:
       root_path_2: ./load/CAMO/Train_gt
       cache: none
       split_key: train
+      color_mask: true
   wrapper:
     name: train
     args:
       inp_size: 1024
       augment: false
+      color_mask: true
   batch_size: 2
 
 val_dataset:
@@ -21,10 +23,12 @@ val_dataset:
       root_path_2: ./load/CAMO/Test_gt
       cache: none
       split_key: test
+      color_mask: true
   wrapper:
     name: val
     args:
       inp_size: 1024
+      color_mask: true
   batch_size: 2
 
 test_dataset:
@@ -35,13 +39,15 @@ test_dataset:
       root_path_2: ./load/CAMO/Test_gt
       cache: none
       split_key: test
+      color_mask: true
   wrapper:
     name: val
     args:
       inp_size: 1024
+      color_mask: true
   batch_size: 1
 
-eval_type: cod
+eval_type: miou
 sam_checkpoint: ./pretrained/sam_vit_l_0b3195.pth
 data_norm:
   inp:
@@ -63,7 +69,7 @@ model:
   name: sam
   args:
     inp_size: 1024
-    loss: iou
+    loss: ce
     encoder_mode:
       name: sam
       img_size: 1024

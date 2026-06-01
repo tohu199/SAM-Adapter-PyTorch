@@ -119,6 +119,42 @@ def make_coord(shape, ranges=None, flatten=True):
 
 
 
+def calc_miou(y_pred, y_true, num_classes=3):
+    """Mean IoU for multi-class segmentation.
+
+    Args:
+        y_pred: [N, H, W] predicted class indices (long/int)
+        y_true: [N, H, W] ground-truth class indices (long/int)
+    """
+    if y_pred.dim() == 4:
+        y_pred = y_pred.squeeze(1)
+    if y_true.dim() == 4:
+        y_true = y_true.squeeze(1)
+    y_pred = y_pred.long().cpu()
+    y_true = y_true.long().cpu()
+
+    ious = []
+    for cls in range(num_classes):
+        inter = 0
+        union = 0
+        for i in range(y_true.shape[0]):
+            pred_c = y_pred[i] == cls
+            true_c = y_true[i] == cls
+            inter += (pred_c & true_c).sum().item()
+            union += (pred_c | true_c).sum().item()
+        if union == 0:
+            ious.append(float('nan'))
+        else:
+            ious.append(inter / union)
+
+    valid = [v for v in ious if not np.isnan(v)]
+    miou = float(np.mean(valid)) if valid else 0.0
+    iou0 = 0.0 if np.isnan(ious[0]) else float(ious[0])
+    iou1 = 0.0 if np.isnan(ious[1]) else float(ious[1])
+    iou2 = 0.0 if np.isnan(ious[2]) else float(ious[2])
+    return miou, iou0, iou1, iou2
+
+
 def calc_cod(y_pred, y_true):
     batchsize = y_true.shape[0]
 

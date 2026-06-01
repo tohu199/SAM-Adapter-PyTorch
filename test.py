@@ -11,7 +11,10 @@ import models
 import utils
 
 from torchvision import transforms
-from mmcv.runner import load_checkpoint
+
+
+def _scalar(x):
+    return x.item() if torch.is_tensor(x) else float(x)
 
 
 def batched_predict(model, inp, coord, bsize):
@@ -58,6 +61,9 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None,
     elif eval_type == 'cod':
         metric_fn = utils.calc_cod
         metric1, metric2, metric3, metric4 = 'sm', 'em', 'wfm', 'mae'
+    elif eval_type == 'miou':
+        metric_fn = utils.calc_miou
+        metric1, metric2, metric3, metric4 = 'miou', 'iou_0', 'iou_1', 'iou_2'
 
     val_metric1 = utils.Averager()
     val_metric2 = utils.Averager()
@@ -72,13 +78,17 @@ def eval_psnr(loader, model, data_norm=None, eval_type=None, eval_bsize=None,
 
         inp = batch['inp']
 
-        pred = torch.sigmoid(model.infer(inp))
+        logits = model.infer(inp)
+        if eval_type == 'miou':
+            pred = logits.argmax(dim=1)
+        else:
+            pred = torch.sigmoid(logits)
 
         result1, result2, result3, result4 = metric_fn(pred, batch['gt'])
-        val_metric1.add(result1.item(), inp.shape[0])
-        val_metric2.add(result2.item(), inp.shape[0])
-        val_metric3.add(result3.item(), inp.shape[0])
-        val_metric4.add(result4.item(), inp.shape[0])
+        val_metric1.add(_scalar(result1), inp.shape[0])
+        val_metric2.add(_scalar(result2), inp.shape[0])
+        val_metric3.add(_scalar(result3), inp.shape[0])
+        val_metric4.add(_scalar(result4), inp.shape[0])
 
         if verbose:
             pbar.set_description('val {} {:.4f}'.format(metric1, val_metric1.item()))

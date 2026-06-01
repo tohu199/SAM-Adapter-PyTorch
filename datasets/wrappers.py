@@ -11,6 +11,7 @@ from torchvision import transforms
 import torchvision
 
 from datasets import register
+from datasets.color_utils import rgb_pil_to_label
 import cv2
 from math import pi
 from torchvision.transforms import InterpolationMode
@@ -28,22 +29,30 @@ def resize_fn(img, size):
             transforms.ToPILImage()(img)))
 
 
+def _mask_to_gt(mask, inp_size, color_mask):
+    """Resize mask and return class index map [H, W] long."""
+    mask = transforms.Resize(
+        (inp_size, inp_size), interpolation=InterpolationMode.NEAREST)(mask)
+    if color_mask:
+        return torch.from_numpy(rgb_pil_to_label(mask)).long()
+    mask = mask.convert('L')
+    tensor = transforms.ToTensor()(mask).squeeze(0)
+    return (tensor > 0.5).long()
+
+
 @register('val')
 class ValDataset(Dataset):
-    def __init__(self, dataset, inp_size=None, augment=False):
+    def __init__(self, dataset, inp_size=None, augment=False, color_mask=False):
         self.dataset = dataset
         self.inp_size = inp_size
         self.augment = augment
+        self.color_mask = color_mask
 
         self.img_transform = transforms.Compose([
                 transforms.Resize((inp_size, inp_size)),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
-            ])
-        self.mask_transform = transforms.Compose([
-                transforms.Resize((inp_size, inp_size), interpolation=Image.NEAREST),
-                transforms.ToTensor(),
             ])
 
     def __len__(self):
@@ -54,14 +63,14 @@ class ValDataset(Dataset):
 
         return {
             'inp': self.img_transform(img),
-            'gt': self.mask_transform(mask)
+            'gt': _mask_to_gt(mask, self.inp_size, self.color_mask),
         }
 
 
 @register('train')
 class TrainDataset(Dataset):
     def __init__(self, dataset, size_min=None, size_max=None, inp_size=None,
-                 augment=False, gt_resize=None):
+                 augment=False, gt_resize=None, color_mask=False):
         self.dataset = dataset
         self.size_min = size_min
         if size_max is None:
@@ -69,6 +78,7 @@ class TrainDataset(Dataset):
         self.size_max = size_max
         self.augment = augment
         self.gt_resize = gt_resize
+        self.color_mask = color_mask
 
         self.inp_size = inp_size
         self.img_transform = transforms.Compose([
@@ -83,10 +93,6 @@ class TrainDataset(Dataset):
                 transforms.Normalize(mean=[-0.485, -0.456, -0.406],
                                      std=[1, 1, 1])
             ])
-        self.mask_transform = transforms.Compose([
-                transforms.Resize((self.inp_size, self.inp_size)),
-                transforms.ToTensor(),
-            ])
 
     def __len__(self):
         return len(self.dataset)
@@ -100,9 +106,9 @@ class TrainDataset(Dataset):
             mask = mask.transpose(Image.FLIP_LEFT_RIGHT)
 
         img = transforms.Resize((self.inp_size, self.inp_size))(img)
-        mask = transforms.Resize((self.inp_size, self.inp_size), interpolation=InterpolationMode.NEAREST)(mask)
+        gt = _mask_to_gt(mask, self.inp_size, self.color_mask)
 
         return {
             'inp': self.img_transform(img),
-            'gt': self.mask_transform(mask)
+            'gt': gt,
         }

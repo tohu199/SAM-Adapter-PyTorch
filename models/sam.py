@@ -145,6 +145,9 @@ class SAM(nn.Module):
             self.criterionBCE = torch.nn.BCEWithLogitsLoss()
             self.criterionIOU = IOU()
 
+        elif self.loss_mode == 'ce':
+            self.criterionCE = torch.nn.CrossEntropyLoss()
+
         self.pe_layer = PositionEmbeddingRandom(encoder_mode['prompt_embed_dim'] // 2)
         self.inp_size = inp_size
         self.image_embedding_size = inp_size // encoder_mode['patch_size']
@@ -152,7 +155,15 @@ class SAM(nn.Module):
 
     def set_input(self, input, gt_mask):
         self.input = input.to(self.device)
-        self.gt_mask = gt_mask.to(self.device)
+        gt_mask = gt_mask.to(self.device)
+        if gt_mask.dim() == 4 and gt_mask.shape[1] == 1:
+            gt_mask = gt_mask.squeeze(1)
+        if self.loss_mode == 'ce':
+            self.gt_mask = gt_mask.long()
+        else:
+            if gt_mask.dim() == 3:
+                gt_mask = gt_mask.unsqueeze(1)
+            self.gt_mask = gt_mask.float()
 
     def get_dense_pe(self) -> torch.Tensor:
         """
@@ -166,53 +177,40 @@ class SAM(nn.Module):
         return self.pe_layer(self.image_embedding_size).unsqueeze(0)
 
 
-    def forward(self):
+    def _decode_masks_batch(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        """Decode masks for a single-image batch (B must be 1)."""
         bs = 1
-
-        # Embed prompts
-        sparse_embeddings = torch.empty((bs, 0, self.prompt_embed_dim), device=self.input.device)
+        sparse_embeddings = torch.empty(
+            (bs, 0, self.prompt_embed_dim), device=input_tensor.device)
         dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
             bs, -1, self.image_embedding_size, self.image_embedding_size
         )
 
-        self.features = self.image_encoder(self.input)
-
-        # Predict masks
-        low_res_masks, iou_predictions = self.mask_decoder(
-            image_embeddings=self.features,
+        features = self.image_encoder(input_tensor)
+        multimask = self.loss_mode == 'ce'
+        low_res_masks, _ = self.mask_decoder(
+            image_embeddings=features,
             image_pe=self.get_dense_pe(),
             sparse_prompt_embeddings=sparse_embeddings,
             dense_prompt_embeddings=dense_embeddings,
-            multimask_output=False,
+            multimask_output=multimask,
+        )
+        return self.postprocess_masks(low_res_masks, self.inp_size, self.inp_size)
+
+    def _decode_masks(self, input_tensor: torch.Tensor) -> torch.Tensor:
+        if input_tensor.shape[0] == 1:
+            return self._decode_masks_batch(input_tensor)
+        return torch.cat(
+            [self._decode_masks_batch(input_tensor[i:i + 1])
+             for i in range(input_tensor.shape[0])],
+            dim=0,
         )
 
-        # Upscale the masks to the original image resolution
-        masks = self.postprocess_masks(low_res_masks, self.inp_size, self.inp_size)
-        self.pred_mask = masks
+    def forward(self):
+        self.pred_mask = self._decode_masks(self.input)
 
     def infer(self, input):
-        bs = 1
-
-        # Embed prompts
-        sparse_embeddings = torch.empty((bs, 0, self.prompt_embed_dim), device=input.device)
-        dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
-            bs, -1, self.image_embedding_size, self.image_embedding_size
-        )
-
-        self.features = self.image_encoder(input)
-
-        # Predict masks
-        low_res_masks, iou_predictions = self.mask_decoder(
-            image_embeddings=self.features,
-            image_pe=self.get_dense_pe(),
-            sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=dense_embeddings,
-            multimask_output=False,
-        )
-
-        # Upscale the masks to the original image resolution
-        masks = self.postprocess_masks(low_res_masks, self.inp_size, self.inp_size)
-        return masks
+        return self._decode_masks(input)
 
     def postprocess_masks(
         self,
@@ -246,10 +244,13 @@ class SAM(nn.Module):
         return masks
 
     def backward_G(self):
-        """Calculate GAN and L1 loss for the generator"""
-        self.loss_G = self.criterionBCE(self.pred_mask, self.gt_mask)
-        if self.loss_mode == 'iou':
-            self.loss_G += _iou_loss(self.pred_mask, self.gt_mask)
+        """Calculate segmentation loss."""
+        if self.loss_mode == 'ce':
+            self.loss_G = self.criterionCE(self.pred_mask, self.gt_mask)
+        else:
+            self.loss_G = self.criterionBCE(self.pred_mask, self.gt_mask)
+            if self.loss_mode == 'iou':
+                self.loss_G += _iou_loss(self.pred_mask, self.gt_mask)
 
         self.loss_G.backward()
 

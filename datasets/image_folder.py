@@ -15,7 +15,7 @@ from datasets import register
 @register('image-folder')
 class ImageFolder(Dataset):
     def __init__(self, path,  split_file=None, split_key=None, first_k=None, size=None,
-                 repeat=1, cache='none', mask=False):
+                 repeat=1, cache='none', mask=False, color_mask=False):
         self.repeat = repeat
         self.cache = cache
         self.path = path
@@ -24,6 +24,7 @@ class ImageFolder(Dataset):
 
         self.size = size
         self.mask = mask
+        self.color_mask = color_mask
         if self.mask:
             self.img_transform = transforms.Compose([
                 transforms.Resize((self.size, self.size), interpolation=Image.NEAREST),
@@ -70,6 +71,8 @@ class ImageFolder(Dataset):
 
     def img_process(self, file):
         if self.mask:
+            if self.color_mask:
+                return Image.open(file).convert('RGB')
             return Image.open(file).convert('L')
         else:
             return Image.open(file).convert('RGB')
@@ -77,9 +80,10 @@ class ImageFolder(Dataset):
 @register('paired-image-folders')
 class PairedImageFolders(Dataset):
 
-    def __init__(self, root_path_1, root_path_2, **kwargs):
+    def __init__(self, root_path_1, root_path_2, color_mask=False, **kwargs):
         self.dataset_1 = ImageFolder(root_path_1, **kwargs)
-        self.dataset_2 = ImageFolder(root_path_2, **kwargs, mask=True)
+        self.dataset_2 = ImageFolder(
+            root_path_2, **kwargs, mask=True, color_mask=color_mask)
 
     def __len__(self):
         return len(self.dataset_1)

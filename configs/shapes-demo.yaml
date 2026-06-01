@@ -1,11 +1,11 @@
+# Toy shapes dataset smoke test (ViT-B, 256x256)
 train_dataset:
   dataset:
     name: paired-image-folders
     args:
-      root_path_1: /public2/home/chaotao/datasets/codDataset/train/img
-      root_path_2: /public2/home/chaotao/datasets/codDataset/train/gt
+      root_path_1: ./load/shapes_demo/images/train
+      root_path_2: ./load/shapes_demo/masks/train
       cache: none
-      split_key: train
       color_mask: true
   wrapper:
     name: train
@@ -13,30 +13,14 @@ train_dataset:
       inp_size: 1024
       augment: false
       color_mask: true
-  batch_size: 2
+  batch_size: 1
 
 val_dataset:
   dataset:
     name: paired-image-folders
     args:
-      root_path_1: /public2/home/chaotao/datasets/COD/TestDataset/COD10K/Imgs
-      root_path_2: /public2/home/chaotao/datasets/COD/TestDataset/COD10K/GT
-      cache: none
-      split_key: test
-      color_mask: true
-  wrapper:
-    name: val
-    args:
-      inp_size: 1024
-      color_mask: true
-  batch_size: 2
-
-test_dataset:
-  dataset:
-    name: paired-image-folders
-    args:
-      root_path_1: /public2/home/chaotao/datasets/COD/TestDataset/COD10K/Imgs
-      root_path_2: /public2/home/chaotao/datasets/COD/TestDataset/COD10K/GT
+      root_path_1: ./load/shapes_demo/images/val
+      root_path_2: ./load/shapes_demo/masks/val
       cache: none
       split_key: test
       color_mask: true
@@ -47,24 +31,24 @@ test_dataset:
       color_mask: true
   batch_size: 1
 
+test_dataset:
+  dataset:
+    name: paired-image-folders
+    args:
+      root_path_1: ./load/shapes_demo/images/val
+      root_path_2: ./load/shapes_demo/masks/val
+      cache: none
+      color_mask: true
+  wrapper:
+    name: val
+    args:
+      inp_size: 1024
+      color_mask: true
+  batch_size: 1
+
 eval_type: miou
 sam_checkpoint: ./pretrained/sam_vit_b_01ec64.pth
-data_norm:
-  inp:
-    sub:
-    - 0.5
-    div:
-    - 0.5
-  gt:
-    sub:
-    - 0.5
-    div:
-    - 0.5
-  gt_rgb:
-    sub:
-    - 0.5
-    div:
-    - 0.5
+
 model:
   name: sam
   args:
@@ -109,6 +93,3 @@ multi_step_lr:
   gamma: 0.1
 epoch_val: 1
 epoch_save: 1
-
-#resume: 60
-#start_epoch: 60

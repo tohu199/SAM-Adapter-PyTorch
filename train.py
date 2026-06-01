@@ -57,6 +57,9 @@ def eval_psnr(loader, model, eval_type=None):
     elif eval_type == 'cod':
         metric_fn = utils.calc_cod
         metric1, metric2, metric3, metric4 = 'sm', 'em', 'wfm', 'mae'
+    elif eval_type == 'miou':
+        metric_fn = utils.calc_miou
+        metric1, metric2, metric3, metric4 = 'miou', 'iou_0', 'iou_1', 'iou_2'
 
     if local_rank == 0:
         pbar = tqdm(total=len(loader), leave=False, desc='val')
@@ -71,7 +74,11 @@ def eval_psnr(loader, model, eval_type=None):
 
         inp = batch['inp']
 
-        pred = torch.sigmoid(model.infer(inp))
+        logits = model.infer(inp)
+        if eval_type == 'miou':
+            pred = logits.argmax(dim=1)
+        else:
+            pred = torch.sigmoid(logits)
 
         batch_pred = [torch.zeros_like(pred) for _ in range(dist.get_world_size())]
         batch_gt = [torch.zeros_like(batch['gt']) for _ in range(dist.get_world_size())]
