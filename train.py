@@ -28,7 +28,10 @@ def make_data_loader(spec, tag=''):
     if local_rank == 0:
         log('{} dataset: size={}'.format(tag, len(dataset)))
         for k, v in dataset[0].items():
-            log(f'  {k}: shape={tuple(v.shape)}')
+            if hasattr(v, 'shape'):
+                log(f'  {k}: shape={tuple(v.shape)}')
+            else:
+                log(f'  {k}: {v!r}')
 
     sampler = torch.utils.data.distributed.DistributedSampler(dataset)
     loader = DataLoader(dataset, batch_size=spec['batch_size'],
@@ -78,7 +81,8 @@ def eval_psnr(loader, model, eval_type=None):
     
     for batch in loader:
         for k, v in batch.items():
-            batch[k] = v.cuda()
+            if torch.is_tensor(v):
+                batch[k] = v.cuda()
 
         inp = batch['inp']
 
@@ -143,19 +147,18 @@ def train(train_loader, model):
 
     loss_list = []
     for batch in train_loader:
+        for k, v in batch.items():
+            if torch.is_tensor(v):
+                batch[k] = v.to(device)
         inp = batch['inp']
         gt = batch['gt']
 
         model.module.optimizer.zero_grad()
+        model.module.set_input(inp, gt)
+        model.module.optimize_parameters()
 
-        loss = model(inp, gt)
-
-        loss.backward()
-
-        model.module.optimizer.step()
-
-        batch_loss = [torch.zeros_like(loss) for _ in range(dist.get_world_size())]
-        dist.all_gather(batch_loss, loss)
+        batch_loss = [torch.zeros_like(model.module.loss_G) for _ in range(dist.get_world_size())]
+        dist.all_gather(batch_loss, model.module.loss_G)
         loss_list.extend(batch_loss)
 
         if pbar is not None:

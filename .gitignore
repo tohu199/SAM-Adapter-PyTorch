@@ -1,0 +1,13 @@
+.venv/
+
+logs/
+checkpoints/
+results/
+data/
+
+*.pyc
+__pycache__
+
+load/
+pretrained/
+save/*

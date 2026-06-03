@@ -10,7 +10,7 @@ import utils
 from torchvision.utils import save_image
 import torch.nn.functional as F
 
-from models.sam2.utils import transforms
+from torchvision import transforms
 
 
 def tensor2PIL(tensor):

@@ -1,9 +1,10 @@
+# SAM3: inp_size 1008, ViT-L encoder (1024/24), sam3.pt with detector.backbone.* keys
 train_dataset:
   dataset:
     name: paired-image-folders
     args:
-      root_path_1: /home/ubuntu/public_c/crl/ref/data/kvasir-seg/train/images
-      root_path_2: /home/ubuntu/public_c/crl/ref/data/kvasir-seg/train/masks
+      root_path_1: ./load/codDataset/train/img
+      root_path_2: ./load/codDataset/train/gt
       cache: none
       split_key: train
   wrapper:
@@ -12,14 +13,14 @@ train_dataset:
 #      inp_size: 1024
       inp_size: 1008
       augment: false
-  batch_size: 2
+  batch_size: 1
 
 val_dataset:
   dataset:
     name: paired-image-folders
     args:
-      root_path_1: /home/ubuntu/public_c/crl/ref/data/kvasir-seg/test/images
-      root_path_2: /home/ubuntu/public_c/crl/ref/data/kvasir-seg/test/masks
+      root_path_1: ./load/codDataset/val/img
+      root_path_2: ./load/codDataset/val/gt
       cache: none
       split_key: test
   wrapper:
@@ -27,14 +28,14 @@ val_dataset:
     args:
 #      inp_size: 1024
       inp_size: 1008
-  batch_size: 2
+  batch_size: 1
 
 test_dataset:
   dataset:
     name: paired-image-folders
     args:
-      root_path_1: /home/ubuntu/public_c/crl/ref/data/kvasir-seg/test/images
-      root_path_2: /home/ubuntu/public_c/crl/ref/data/kvasir-seg/test/masks
+      root_path_1: ./load/codDataset/val/img
+      root_path_2: ./load/codDataset/val/gt
       cache: none
       split_key: test
   wrapper:
@@ -45,8 +46,7 @@ test_dataset:
   batch_size: 1
 
 eval_type: cod
-#sam_checkpoint: /home/ubuntu/public_c/crl/phd/res/checkpoint/sam2/sam2_hiera_large.pt
-sam_checkpoint: /home/ubuntu/public_c/crl/sam3_adapter/checkpoint/sam3.pt
+sam_checkpoint: ./pretrained/sam3.pt
 #sam_checkpoint: /home/ubuntu/public_c/crl/sam3_adapter/SAM-Adapter-PyTorch/save/_cod-sam-vit-l/model_epoch_best.pth
 data_norm:
   inp:

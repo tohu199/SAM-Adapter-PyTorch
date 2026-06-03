@@ -1,3 +1,4 @@
+# NOT SAM3: SAM1 ViT-B encoder (768/12) + SAM2 checkpoint path. Use cod-sam-vit-l.yaml for SAM3.
 train_dataset:
   dataset:
     name: paired-image-folders

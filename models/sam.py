@@ -7,7 +7,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models import register
-from .mmseg.models.sam import ImageEncoderViT, MaskDecoder, TwoWayTransformer
+from .mmseg.models.sam.image_encoder import ImageEncoderViT
+from .mmseg.models.sam.mask_decoder import MaskDecoder
+from .mmseg.models.sam.transformer import TwoWayTransformer
 
 logger = logging.getLogger(__name__)
 from .iou_loss import IOU
