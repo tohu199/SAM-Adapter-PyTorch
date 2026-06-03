@@ -162,9 +162,10 @@ class MultiScaleBlock(nn.Module):
             window_size = self.window_size // self.q_stride[0]
             H, W = shortcut.shape[1:3]
 
-            pad_h = (window_size - H % window_size) % window_size
-            pad_w = (window_size - W % window_size) % window_size
-            pad_hw = (H + pad_h, W + pad_w)
+            if window_size > 0:
+                pad_h = (window_size - H % window_size) % window_size
+                pad_w = (window_size - W % window_size) % window_size
+                pad_hw = (H + pad_h, W + pad_w)
 
         # Reverse window partition
         if self.window_size > 0:
@@ -250,6 +251,14 @@ class Hiera(nn.Module):
             43
         ),
         return_interm_layers=True,  # return feats from every stage
+        scale_factor: int = 32,
+        prompt_type: str = 'highpass',
+        tuning_stage: str = "1234",
+        input_type: str = 'fft',
+        freq_nums: float = 0.25,
+        handcrafted_tune: bool = True,
+        embedding_tune: bool = True,
+        adaptor: str = 'adaptor',
     ):
         super().__init__()
 
@@ -304,14 +313,14 @@ class Hiera(nn.Module):
         self.embed_dim = embed_dims
         self.depth = stages
         self.blocks = nn.ModuleList()
-        self.scale_factor = 32
-        self.prompt_type = 'highpass'
-        self.tuning_stage = "1234"
-        self.input_type = 'fft'
-        self.freq_nums = 0.25
-        self.handcrafted_tune = True
-        self.embedding_tune = True
-        self.adaptor = 'adaptor'
+        self.scale_factor = scale_factor
+        self.prompt_type = prompt_type
+        self.tuning_stage = tuning_stage
+        self.input_type = input_type
+        self.freq_nums = freq_nums
+        self.handcrafted_tune = handcrafted_tune
+        self.embedding_tune = embedding_tune
+        self.adaptor = adaptor
         self.prompt_generator = PromptGenerator(self.scale_factor, self.prompt_type, self.embed_dim,
                                                 self.tuning_stage, self.depth,
                                                 self.input_type, self.freq_nums,
@@ -364,71 +373,34 @@ class Hiera(nn.Module):
     def forward(self, x: torch.Tensor) -> List[torch.Tensor]:
         inp = x
         x = self.patch_embed(x)
-        # x: (B, H, W, C)
         handcrafted1, handcrafted2, handcrafted3, handcrafted4 = self.prompt_generator.init_handcrafted(inp)
+        handcrafteds = [handcrafted1, handcrafted2, handcrafted3, handcrafted4]
 
-        self.block1 = []
-        self.block2 = []
-        self.block3 = []
-        self.block4 = []
-        outputs = []
-
-        for i, blk in enumerate(self.blocks):
-            if i < 3:
-                self.block1.append(blk)  # 第一个块包含前3个元素
-            elif 2 < i < 9:
-                self.block2.append(blk)  # 第二个块包含接下来的6个元素
-            elif 8 < i < 45:
-                self.block3.append(blk)  # 第三个块包含接下来的36个元素
-            elif 44 < i:
-                self.block4.append(blk)  # 其余元素组成第四个块
-
-        # Add pos embed
         x = x + self._get_pos_embed(x.shape[1:3])
+        outputs = []
+        offset = 0
+        for stage_idx, stage_depth in enumerate(self.depth):
+            stage_num = stage_idx + 1
+            stage_blocks = self.blocks[offset:offset + stage_depth]
+            offset += stage_depth
 
-        if '1' in self.tuning_stage:
-            prompt1 = self.prompt_generator.init_prompt(x, handcrafted1, 1)
-        for i, blk in enumerate(self.block1):
-            if '1' in self.tuning_stage:
-                x = self.prompt_generator.get_prompt(x, prompt1, 1, i)
-            x = blk(x)
-        # x = self.norm1(x)
-            if i == 1:
-                feat = x.permute(0, 3, 1, 2)
-                outputs.append(feat)
+            # After stage 1, the first block of each stage applies q-pool / dim change.
+            # Initialize prompts once that transition block has run, matching SAM2 Hiera staging.
+            start_i = 0
+            if stage_num > 1:
+                x = stage_blocks[0](x)
+                start_i = 1
 
-        if '2' in self.tuning_stage:
-            prompt2 = self.prompt_generator.init_prompt(x, handcrafted2, 2)
-        for i, blk in enumerate(self.block2):
-            if '2' in self.tuning_stage:
-                x = self.prompt_generator.get_prompt(x, prompt2, 2, i)
-            x = blk(x)
-        # x = self.norm2(x)
-            if i == 4:
-                feat = x.permute(0, 3, 1, 2)
-                outputs.append(feat)
+            prompt = None
+            if str(stage_num) in self.tuning_stage:
+                prompt = self.prompt_generator.init_prompt(x, handcrafteds[stage_idx], stage_num)
 
-        if '3' in self.tuning_stage:
-            prompt3 = self.prompt_generator.init_prompt(x, handcrafted3, 3)
-        for i, blk in enumerate(self.block3):
-            if '3' in self.tuning_stage:
-                x = self.prompt_generator.get_prompt(x,prompt3, 3, i)
-            x = blk(x)
-        # x = self.norm3(x)
-            if i == 34:
-                feat = x.permute(0, 3, 1, 2)
-                outputs.append(feat)
+            for i, blk in enumerate(stage_blocks[start_i:], start=start_i):
+                if prompt is not None:
+                    x = self.prompt_generator.get_prompt(x, prompt, stage_num, i)
+                x = blk(x)
 
-        if '4' in self.tuning_stage:
-            prompt4 = self.prompt_generator.init_prompt(x, handcrafted4, 4)
-        for i, blk in enumerate(self.block4):
-            if '4' in self.tuning_stage:
-                x = self.prompt_generator.get_prompt(x, prompt4, 4, i)
-            x = blk(x)
-        # x = self.norm4(x)
-            if i == 2:
-                feat = x.permute(0, 3, 1, 2)
-                outputs.append(feat)
+            outputs.append(x.permute(0, 3, 1, 2))
 
         return outputs
 def to_2tuple(x):
@@ -737,6 +709,13 @@ class PromptGenerator(nn.Module):
         elif self.adaptor == 'fully_unshared':
             fully_unshared_mlp = getattr(self, 'fully_unshared_mlp' + str(block_num) + '_' + str(depth_num))
             feat = fully_unshared_mlp(feat)
+
+        if feat.shape[1] != x.shape[1] or feat.shape[2] != x.shape[2]:
+            feat = feat.permute(0, 3, 1, 2)
+            feat = F.interpolate(
+                feat, size=(x.shape[1], x.shape[2]), mode='bilinear', align_corners=False
+            )
+            feat = feat.permute(0, 2, 3, 1)
 
         x = x + feat
 

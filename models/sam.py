@@ -15,7 +15,84 @@ from typing import Any, Optional, Tuple
 from .sam2.modeling.backbones.image_encoder import ImageEncoder
 from .sam2.modeling.backbones.hieradet import Hiera
 from .sam2.modeling.backbones.image_encoder import FpnNeck
+from .sam2.modeling.position_encoding import PositionEmbeddingSine
 from torch.nn.init import trunc_normal_
+
+
+def _as_tuple(value):
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        return tuple(value)
+    return value
+
+
+def _build_hiera(encoder_mode):
+    backbone_channel_list = encoder_mode.get(
+        'backbone_channel_list', [1152, 576, 288, 144]
+    )
+    embed_dim = encoder_mode.get('embed_dim', backbone_channel_list[-1])
+    embed_dims = encoder_mode.get('embed_dims', list(reversed(backbone_channel_list)))
+
+    hiera_kwargs = {
+        'embed_dim': embed_dim,
+        'embed_dims': embed_dims,
+        'img_size': encoder_mode.get('img_size', 1024),
+        'num_heads': encoder_mode.get('num_heads', 2),
+    }
+    tuple_keys = (
+        'stages',
+        'global_att_blocks',
+        'window_pos_embed_bkg_spatial_size',
+        'window_spec',
+    )
+    scalar_keys = (
+        'scale_factor',
+        'prompt_type',
+        'tuning_stage',
+        'input_type',
+        'freq_nums',
+        'handcrafted_tune',
+        'embedding_tune',
+        'adaptor',
+    )
+    for key in tuple_keys:
+        if key in encoder_mode:
+            hiera_kwargs[key] = _as_tuple(encoder_mode[key])
+    for key in scalar_keys:
+        if key in encoder_mode:
+            val = encoder_mode[key]
+            if key == 'tuning_stage':
+                val = str(val)
+            hiera_kwargs[key] = val
+    return Hiera(**hiera_kwargs)
+
+
+def _build_fpn_neck(encoder_mode):
+    position_encoding = PositionEmbeddingSine(
+        num_pos_feats=encoder_mode.get('num_pos_feats', 256),
+        normalize=encoder_mode.get('normalize', True),
+        scale=encoder_mode.get('scale'),
+        temperature=encoder_mode.get('temperature', 10000),
+    )
+    return FpnNeck(
+        position_encoding=position_encoding,
+        d_model=encoder_mode.get('d_model', 256),
+        backbone_channel_list=encoder_mode.get(
+            'backbone_channel_list', [1152, 576, 288, 144]
+        ),
+        fpn_top_down_levels=encoder_mode.get('fpn_top_down_levels', [2, 3]),
+        fpn_interp_model=encoder_mode.get('fpn_interp_model', 'nearest'),
+    )
+
+
+def _build_image_encoder(encoder_mode):
+    return ImageEncoder(
+        trunk=_build_hiera(encoder_mode),
+        neck=_build_fpn_neck(encoder_mode),
+        scalp=encoder_mode.get('scalp', 1),
+        img_size=encoder_mode.get('img_size', 1024),
+    )
 
 def init_weights(layer):
     if type(layer) == nn.Conv2d:
@@ -109,10 +186,7 @@ class SAM(nn.Module):
         super().__init__()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.embed_dim = encoder_mode['embed_dim']
-        self.image_encoder = ImageEncoder(
-            trunk = Hiera(),
-            neck = FpnNeck(),
-        )
+        self.image_encoder = _build_image_encoder(encoder_mode)
         self._bb_feat_sizes = [
             (256, 256),
             (128, 128),
@@ -178,14 +252,14 @@ class SAM(nn.Module):
 
         self.pe_layer = PositionEmbeddingRandom(encoder_mode['prompt_embed_dim'] // 2)
         self.inp_size = inp_size
-        self.image_embedding_size = inp_size // encoder_mode['patch_size']
+        self.image_embedding_size = inp_size // encoder_mode.get('patch_size', 16)
         self.no_mask_embed = nn.Embedding(1, encoder_mode['prompt_embed_dim'])
 
     def set_input(self, input, gt_mask):
         self.input = input.to(self.device)
         self.gt_mask = gt_mask.to(self.device)
 
-    def get_dense_pe(self) -> torch.Tensor:
+    def get_dense_pe(self, size: Optional[int] = None) -> torch.Tensor:
         """
         Returns the positional encoding used to encode point prompts,
         applied to a dense set of points the shape of the image encoding.
@@ -194,136 +268,70 @@ class SAM(nn.Module):
           torch.Tensor: Positional encoding with shape
             1x(embed_dim)x(embedding_h)x(embedding_w)
         """
-        return self.pe_layer(self.image_embedding_size).unsqueeze(0)
+        if size is None:
+            size = self.image_embedding_size
+        return self.pe_layer(size).unsqueeze(0)
+
+    def _run_mask_decoder(self, input_tensor):
+        bs = input_tensor.shape[0]
+        device = input_tensor.device
+
+        sparse_embeddings = torch.empty((bs, 0, self.prompt_embed_dim), device=device)
+
+        self.features = self.image_encoder(input_tensor)
+        if self.use_high_res_features_in_sam:
+            self.features["backbone_fpn"][0] = self.mask_decoder.conv_s0(
+                self.features["backbone_fpn"][0]
+            )
+            self.features["backbone_fpn"][1] = self.mask_decoder.conv_s1(
+                self.features["backbone_fpn"][1]
+            )
+        self.features = self.features.copy()
+        assert len(self.features["backbone_fpn"]) == len(self.features["vision_pos_enc"])
+        assert len(self.features["backbone_fpn"]) >= self.num_feature_levels
+
+        feature_maps = self.features["backbone_fpn"][-self.num_feature_levels :]
+        vision_pos_embeds = self.features["vision_pos_enc"][-self.num_feature_levels :]
+
+        feat_sizes = [(x.shape[-2], x.shape[-1]) for x in feature_maps]
+        vision_feats = [x.flatten(2).permute(2, 0, 1) for x in feature_maps]
+        vision_pos_embeds = [x.flatten(2).permute(2, 0, 1) for x in vision_pos_embeds]
+
+        if self.directly_add_no_mem_embed:
+            vision_feats[-1] = vision_feats[-1] + torch.zeros(
+                1, 1, self.prompt_embed_dim, device=device, dtype=vision_feats[-1].dtype
+            )
+
+        feats = [
+            feat.permute(1, 2, 0).view(bs, -1, h, w)
+            for feat, (h, w) in zip(vision_feats[::-1], feat_sizes[::-1])
+        ][::-1]
+        self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
+
+        embed_h, embed_w = feat_sizes[-1]
+        dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
+            bs, -1, embed_h, embed_w
+        )
+        high_res_features = list(self._features["high_res_feats"])
+
+        return self.mask_decoder(
+            image_embeddings=self._features["image_embed"],
+            image_pe=self.get_dense_pe(embed_h),
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=True,
+            repeat_image=False,
+            high_res_features=high_res_features,
+        )
 
 
     def forward(self):
-        bs = 2
-
-        # Embed prompts
-        sparse_embeddings = torch.empty((bs, 0, self.prompt_embed_dim), device=self.input.device)
-        dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
-            bs, -1, self.image_embedding_size, self.image_embedding_size
-        )
-
-        self.features = self.image_encoder(self.input)
-        if self.use_high_res_features_in_sam:
-            # precompute projected level 0 and level 1 features in SAM decoder
-            # to avoid running it again on every SAM click
-            self.features["backbone_fpn"][0] = self.mask_decoder.conv_s0(
-                self.features["backbone_fpn"][0]
-            )
-            self.features["backbone_fpn"][1] = self.mask_decoder.conv_s1(
-                self.features["backbone_fpn"][1]
-            )
-        self.features = self.features.copy()
-        assert len(self.features["backbone_fpn"]) == len(self.features["vision_pos_enc"])
-        assert len(self.features["backbone_fpn"]) >= self.num_feature_levels
-
-        feature_maps = self.features["backbone_fpn"][-self.num_feature_levels :]
-        vision_pos_embeds = self.features["vision_pos_enc"][-self.num_feature_levels :]
-
-        feat_sizes = [(x.shape[-2], x.shape[-1]) for x in vision_pos_embeds]
-        # flatten NxCxHxW to HWxNxC
-        vision_feats = [x.flatten(2).permute(2, 0, 1) for x in feature_maps]
-        vision_pos_embeds = [x.flatten(2).permute(2, 0, 1) for x in vision_pos_embeds]
-
-        _, vision_feats, _, _ = self.features, vision_feats, vision_pos_embeds, feat_sizes
-
-        if self.directly_add_no_mem_embed:
-            vision_feats[-1] = vision_feats[-1] + torch.nn.Parameter(torch.zeros(1, 1, 256).to('cuda'))
-        feats = [
-            feat.permute(1, 2, 0).view(2, -1, *feat_size)
-            for feat, feat_size in zip(vision_feats[::-1], self._bb_feat_sizes[::-1])
-        ][::-1]
-        self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
-        high_res_features = [
-            feat_level[-1].unsqueeze(0)
-            for feat_level in self._features["high_res_feats"]
-        ]
-        # Predict masks
-        low_res_masks, iou_predictions,sam_output_tokens,object_score_logits, = self.mask_decoder(
-            image_embeddings=self._features["image_embed"],
-            image_pe=self.get_dense_pe(),
-            sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=dense_embeddings,
-            multimask_output=True,
-            repeat_image=False,  # the image is already batched
-            high_res_features=high_res_features,
-        )
-
-        # Upscale the masks to the original image resolution
-        masks = self.postprocess_masks(low_res_masks, self.inp_size, self.inp_size)
-        # masks = torch.stack([
-        #     self.postprocess_masks(low_res_masks[i], self.inp_size)
-        # for i in range(low_res_masks.shape[0])
-        # ])
-        # low_res_masks = torch.clamp(low_res_masks, -32.0, 32.0)
-        # if not return_logits:
-        # if not False:
-        #     # masks = masks > self.mask_threshold
-        #     masks = masks > 0.0
-        self.pred_mask = masks
+        low_res_masks, iou_predictions, sam_output_tokens, object_score_logits = self._run_mask_decoder(self.input)
+        self.pred_mask = self.postprocess_masks(low_res_masks, self.inp_size, self.inp_size)
 
     def infer(self, input):
-        bs = 2
-
-        # Embed prompts
-        sparse_embeddings = torch.empty((bs, 0, self.prompt_embed_dim), device=input.device)
-        dense_embeddings = self.no_mask_embed.weight.reshape(1, -1, 1, 1).expand(
-            bs, -1, self.image_embedding_size, self.image_embedding_size
-        )
-
-        self.features = self.image_encoder(input)
-        if self.use_high_res_features_in_sam:
-            # precompute projected level 0 and level 1 features in SAM decoder
-            # to avoid running it again on every SAM click
-            self.features["backbone_fpn"][0] = self.mask_decoder.conv_s0(
-                self.features["backbone_fpn"][0]
-            )
-            self.features["backbone_fpn"][1] = self.mask_decoder.conv_s1(
-                self.features["backbone_fpn"][1]
-            )
-        self.features = self.features.copy()
-        assert len(self.features["backbone_fpn"]) == len(self.features["vision_pos_enc"])
-        assert len(self.features["backbone_fpn"]) >= self.num_feature_levels
-
-        feature_maps = self.features["backbone_fpn"][-self.num_feature_levels :]
-        vision_pos_embeds = self.features["vision_pos_enc"][-self.num_feature_levels :]
-
-        feat_sizes = [(x.shape[-2], x.shape[-1]) for x in vision_pos_embeds]
-        # flatten NxCxHxW to HWxNxC
-        vision_feats = [x.flatten(2).permute(2, 0, 1) for x in feature_maps]
-        vision_pos_embeds = [x.flatten(2).permute(2, 0, 1) for x in vision_pos_embeds]
-
-        _, vision_feats, _, _ = self.features, vision_feats, vision_pos_embeds, feat_sizes
-
-        if self.directly_add_no_mem_embed:
-            vision_feats[-1] = vision_feats[-1] + torch.nn.Parameter(torch.zeros(1, 1, 256).to('cuda'))
-        feats = [
-            feat.permute(1, 2, 0).view(bs, -1, *feat_size)
-            for feat, feat_size in zip(vision_feats[::-1], self._bb_feat_sizes[::-1])
-        ][::-1]
-        self._features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
-        high_res_features = [
-            feat_level[-1].unsqueeze(0)
-            for feat_level in self._features["high_res_feats"]
-        ]
-
-        # Predict masks
-        low_res_masks, iou_predictions,sam_output_tokens,object_score_logits, = self.mask_decoder(
-            image_embeddings=self._features["image_embed"],
-            image_pe=self.get_dense_pe(),
-            sparse_prompt_embeddings=sparse_embeddings,
-            dense_prompt_embeddings=dense_embeddings,
-            multimask_output=True,
-            repeat_image=False,  # the image is already batched
-            high_res_features=high_res_features,
-        )
-
-        # Upscale the masks to the original image resolution
-        masks = self.postprocess_masks(low_res_masks, self.inp_size, self.inp_size)
-        return masks
+        low_res_masks, iou_predictions, sam_output_tokens, object_score_logits = self._run_mask_decoder(input)
+        return self.postprocess_masks(low_res_masks, self.inp_size, self.inp_size)
 
     def postprocess_masks(
         self,
